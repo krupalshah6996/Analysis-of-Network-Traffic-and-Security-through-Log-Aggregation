@@ -1,0 +1,270 @@
+input {
+    file {
+	path => [ "${LL_LOG_AUTH:/var/log/auth.log}" ]
+	start_position => beginning
+	type => "auth"
+	sincedb_path => "${LL_SINCEDB_AUTH:/var/lib/logstash/plugins/inputs/file/auth.sincedb}"
+    }
+ file {
+    path => ["/home/krupal/Downloads/access.log"]
+    type => "apache_access"
+  }
+  file {
+    path => ["/home/krupal/Downloads/error.log"]
+    type => "apache_error"
+  }
+ file {
+    path => "/home/krupal/Downloads/opt.csv"
+    start_position => "beginning"
+    sincedb_path => "/dev/null"
+    type => "pfsense"
+}
+ file {
+    path => "/home/krupal/Downloads/ipsconv.csv"
+    start_position => "beginning"
+    sincedb_path => "/dev/null"
+    type => "ips"
+}
+file {
+    path => ["/var/log/syslog"]
+    type => "syslog"
+  }
+
+}
+filter {
+    if [type] == "auth" {
+	grok {
+	    match => { "message" => "%{SYSLOGBASE} %{GREEDYDATA:message}" }
+	    overwrite => [ "message" ]
+	}
+	date {
+	    locale => "en"
+	    match => [ "timestamp", "MMM dd HH:mm:ss", "MMM  d HH:mm:ss"  ]
+	    timezone => "Europe/Berlin"
+	}
+
+	if [message] =~ /^pam_/ {
+	    grok {
+		patterns_dir   => "${LL_PATTERN_DIR:/etc/logstash/patterns.d}"
+		match => { "message" => "%{PAM}" }
+		add_tag => [ "_grok_pam_success" ]
+	    }
+	    if [pam_kvdata] {
+		mutate {
+		    gsub => [ "pam_kvdata", "= ", '=- ' ]
+		}
+		kv {
+		    source => "pam_kvdata"
+		    prefix => "pam_"
+		}
+		mutate {
+		    remove_field => [ "pam_kvdata" ]
+		}
+	    }
+	}
+
+	if [program] == "sshd" {
+	    grok {
+		patterns_dir   => "${LL_PATTERN_DIR:/etc/logstash/patterns.d}"
+		match => { "message" => "%{SSH_AUTHFAIL_WRONGCREDS}" }
+		add_field => { "ssh_authresult" => "fail" "ssh_failreason" => "wrong_credentials" }
+		add_tag => [ "_grok_sshd_success", "matched" ]
+	    }
+	    grok {
+		patterns_dir   => "${LL_PATTERN_DIR:/etc/logstash/patterns.d}"
+		match => { "message" => "%{SSH_AUTHFAIL_WRONGUSER}" }
+		add_field => { "ssh_authresult" => "fail" "ssh_failreason" => "unknown_user" }
+		add_tag => [ "_grok_sshd_success", "matched" ]
+	    }
+	    grok {
+		patterns_dir   => "${LL_PATTERN_DIR:/etc/logstash/patterns.d}"
+		match => { "message" => "%{SSH_AUTH_SUCCESS}" }
+		add_field => { "ssh_authresult" => "success" }
+		add_tag => [ "_grok_sshd_success", "matched" ]
+	    }
+	    grok {
+		patterns_dir   => "${LL_PATTERN_DIR:/etc/logstash/patterns.d}"
+		match => { "message" => "%{SSH_DISCONNECT}" }
+		add_tag => [ "_grok_sshd_success", "matched", "ssh_disconnect" ]
+	    }
+	    mutate {
+		remove_tag => [ "matched", "_grokparsefailure" ]
+	    }
+	    geoip {
+		source => "ssh_client_ip"
+	    }
+	}
+
+	if [program] == "sudo" {
+	    grok {
+		patterns_dir   => "${LL_PATTERN_DIR:/etc/logstash/patterns.d}"
+		match => { "message" => "%{SUDO}" }
+		add_tag => [ "_grok_sudo_success" ]
+	    }
+	}
+
+	if [program] == "su" {
+	    grok {
+		patterns_dir   => "${LL_PATTERN_DIR:/etc/logstash/patterns.d}"
+		match => { "message" => "%{SU}" }
+		add_tag => [ "_grok_su_success" ]
+	    }
+	}
+
+	if [program] == "systemd-logind" {
+	    grok {
+		patterns_dir   => "${LL_PATTERN_DIR:/etc/logstash/patterns.d}"
+		match => { "message" => "%{SYSTEMD_LOGIND}" }
+		add_tag => [ "_grok_systemd_logind_success" ]
+	    }
+	}
+
+	if [program] in [ "useradd", "groupadd" ] {
+	    grok {
+		patterns_dir   => "${LL_PATTERN_DIR:/etc/logstash/patterns.d}"
+		match => { "message" => "%{ACCOUNT_ADD}" }
+		add_field => { "account_action" => "create" }
+		add_tag => [ "_grok_new_account_success" ]
+	    }
+	    if [account_kvdata] {
+		mutate {
+		    gsub => [ "account_kvdata", ", ", '|' ]
+		}
+		kv {
+		    source => "account_kvdata"
+		    prefix => "account_"
+		    field_split => "|"
+		}
+		mutate {
+		    remove_field => [ "account_kvdata" ]
+		}
+	    }
+	}
+
+	if [program] == "usermod" {
+	    grok {
+		patterns_dir   => "${LL_PATTERN_DIR:/etc/logstash/patterns.d}"
+		match => { "message" => "%{USERMOD}" }
+		add_tag => [ "_grok_usermod_success" ]
+	    }
+	}
+
+	if [program] == "userdel" {
+	    grok {
+		patterns_dir   => "${LL_PATTERN_DIR:/etc/logstash/patterns.d}"
+		match => { "message" => "%{USERDEL}" }
+		add_tag => [ "_grok_userdel_success" ]
+	    }
+	    mutate {
+		gsub => [ "account_action", "remove", "delete" ]
+	    }
+	}
+
+	if [program] == "groupdel" {
+	    grok {
+		patterns_dir   => "${LL_PATTERN_DIR:/etc/logstash/patterns.d}"
+		match => { "message" => "%{GROUPDEL}" }
+		add_field => { "account_action" => "delete" }
+		add_tag => [ "_grok_groupdel_success" ]
+	    }
+	}
+    }
+if [type] in [ "apache" , "apache_access" , "apache-access" ]  {
+      grok {
+         match => [
+         "message" , "%{COMBINEDAPACHELOG}+%{GREEDYDATA:extra_fields}",
+         "message" , "%{COMMONAPACHELOG}+%{GREEDYDATA:extra_fields}"
+         ]
+         overwrite => [ "message" ]
+      }
+      mutate {
+         convert => ["response", "integer"]
+         convert => ["bytes", "integer"]
+         convert => ["responsetime", "float"]
+      }
+      geoip {
+         source => "clientip"
+         target => "geoip"
+         add_tag => [ "apache-geoip" ]
+      }
+      date {
+         match => [ "timestamp" , "dd/MMM/YYYY:HH:mm:ss Z" ]
+         remove_field => [ "timestamp" ]
+      }
+      useragent {
+         source => "agent"
+      }
+   }
+   if [type] in ["apache_error","apache-error"] {
+      grok {
+         match => ["message", "\[%{WORD:dayname} %{WORD:month} %{DATA:day} %{DATA:hour}:%{DATA:minute}:%{DATA:second} %{YEAR:year}\] \[%{NOTSPACE:loglevel}\] (?:\[client %{IPORHOST:clientip}\] ){0,1}%{GREEDYDATA:message}"]
+         overwrite => [ "message" ]
+      }
+      mutate
+      {
+         add_field =>
+         {
+            "time_stamp" => "%{day}/%{month}/%{year}:%{hour}:%{minute}:%{second}"
+         }
+      }
+      date {
+         match => ["time_stamp", "dd/MMM/YYYY:HH:mm:ss"]
+         remove_field => [ "time_stamp","day","dayname","month","hour","minute","second","year"]
+      }
+   }
+ if [type] == "pfsense" {
+ csv {
+   separator => ","
+   columns => [ "date", "time", "hostname", "rulenumber", "tid", "realinterface", "reason", "action", "direction", "version", "tos", "ttl",
+"id", "offset", "flags", "pid", "protocol", "length", "sourceip", "destip", "srcport", "destport" ]
+}
+geoip {
+        source => "sourceip"
+        target => "geoip"
+        add_field => [ "[geoip][coordinates]", "%{[geoip][longitude]}" ]
+        add_field => [ "[geoip][coordinates]", "%{[geoip][latitude]}" ]
+    }
+    mutate {
+        convert => [ "[geoip][coordinates]", "float"]
+    }
+mutate {convert => ["hostname", "integer"]}
+mutate {convert => ["rulenumber", "integer"]}
+mutate {convert => ["tid", "integer"]}
+mutate {convert => ["version", "integer"]}
+mutate {convert => ["ttl", "integer"]}
+mutate {convert => ["id", "integer"]}
+mutate {convert => ["offset", "integer"]}
+mutate {convert => ["pid", "integer"]}
+mutate {convert => ["length", "integer"]}
+ date {
+      match => [ "timestamp", "MMM  d HH:mm:ss", "MMM dd HH:mm:ss" ]
+    }
+}
+
+ if [type] == "ips" {
+csv {
+   separator => ","
+   columns => [ "timestamp", "ip", "type", "message", "classification", "source_ip", "destination_ip" ]
+}
+ date {
+      match => [ "timestamp", "MMM  d HH:mm:ss", "MMM dd HH:mm:ss" ]
+    }
+
+}
+ if [type] == "syslog" {
+    grok {
+      match => { "message" => "%{SYSLOGTIMESTAMP:syslog_timestamp} %{SYSLOGHOST:syslog_hostname} %{DATA:syslog_program}(?:\[%{POSINT:syslog_pid}\])?: %{GREEDYDATA:syslog_message}" }
+      add_field => [ "received_at", "%{@timestamp}" ]
+      add_field => [ "received_from", "%{host}" ]
+    }
+    date {
+      match => [ "syslog_timestamp", "MMM  d HH:mm:ss", "MMM dd HH:mm:ss" ]
+    }
+  }
+}
+output {
+    elasticsearch {
+	hosts => [ "localhost:9200" ]
+	index => "logstash-%{type}"
+    }
+}
